@@ -1,0 +1,87 @@
+# Build AICode to an unsigned .ipa
+#
+# Runs on a GitHub-hosted macOS 26 runner with Xcode 26. No signing
+# certificates, provisioning profiles, or secrets are used or needed.
+#
+# What it does:
+#   1. Selects Xcode 26 (26.5 if present, else the newest Xcode 26.x).
+#   2. `xcodebuild archive` with CODE_SIGNING_ALLOWED=NO — this only
+#      compiles and bundles the app; the resulting .xcarchive is
+#      UNSIGNED and can never be installed on a stock iPhone as-is.
+#   3. Packages the unsigned .app from the archive as Payload/*.app
+#      inside AICode-unsigned.ipa (a plain zip). `xcodebuild
+#      -exportArchive` is deliberately NOT used: it requires a
+#      signing identity / export options and fails for unsigned builds.
+#   4. Uploads the .ipa as a workflow artifact.
+#
+# To install on a real iPhone, the unsigned .ipa must be re-signed
+# afterwards with a (free) Apple ID via Xcode / AltStore / SideStore,
+# or rebuilt with a paid Apple Developer account and a provisioning
+# profile. See README.md.
+name: Build unsigned IPA
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-unsigned-ipa:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 26
+        run: |
+          XCODE_PATH=$(python3 -c 'import pathlib,re; paths=list(pathlib.Path("/Applications").glob("Xcode_26*.app")); assert paths, "Xcode 26 is required"; print(max(paths,key=lambda p:tuple(map(int,re.findall(r"\d+",p.name)))))')
+          sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
+          xcodebuild -version
+          xcodebuild -showsdks | head -20
+
+      - name: Archive (Release, no code signing)
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -project AICode/AICode.xcodeproj \
+            -scheme AICode \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/AICode.xcarchive \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" 2>&1 | tee build.log
+
+      - name: Package unsigned .ipa from the archive
+        run: |
+          APP_PATH="build/AICode.xcarchive/Products/Applications/AICode.app"
+          test -d "$APP_PATH" || { echo "ERROR: $APP_PATH not found"; ls -R build/AICode.xcarchive; exit 1; }
+          codesign -dv "$APP_PATH" 2>&1 || true
+          rm -rf build/Payload build/AICode-unsigned.ipa
+          mkdir -p build/Payload
+          cp -R "$APP_PATH" build/Payload/
+          (cd build && zip -r -y AICode-unsigned.ipa Payload)
+          ls -lh build/AICode-unsigned.ipa
+          unzip -t build/AICode-unsigned.ipa
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AICode-build-log
+          path: build.log
+          if-no-files-found: ignore
+
+      - name: Upload unsigned .ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: AICode-unsigned
+          path: build/AICode-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
