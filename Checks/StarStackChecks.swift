@@ -71,10 +71,18 @@ enum StarStackChecks {
             .concatenating(CGAffineTransform(rotationAngle: angle))
             .concatenating(CGAffineTransform(translationX: 131, y: 126))
         let shifted = base.transformed(by: transform).cropped(to: CGRect(x: 0, y: 0, width: size, height: size))
+        let sourcePoints = stars.map { CGPoint(x:$0.0,y:$0.1).applying(transform) }
+        let referencePoints = stars.map { CGPoint(x:$0.0,y:$0.1) }
+        let geometric = StarRegistration.align(source:sourcePoints,reference:referencePoints,size:CGSize(width:size,height:size))
+        require(geometric != nil, "Pure constellation matching failed")
+        let error = sourcePoints[0].applying(geometric!)
+        require(hypot(error.x-referencePoints[0].x,error.y-referencePoints[0].y)<0.05, "Constellation transform is backwards")
         let alignedAccepted = try tracking.add(shifted)
         require(alignedAccepted, "Translated/rotated star field was not registered: \(tracking.lastRejection)")
         let aligned = values(tracking.linearImage!)
-        require(value(aligned,85,30) > 0.23, "Registration direction or rotation is wrong")
+        var maximum = 0.0, peak = CGPoint.zero
+        for y in 20..<40 { for x in 75..<95 { let v = value(aligned,x,y); if v > maximum { maximum = v; peak = CGPoint(x:x,y:y) } } }
+        require(value(aligned,85,30) > 0.23, "Registration direction or rotation is wrong: original=\(value(values(base),85,30)), aligned=\(value(aligned,85,30)), peak=\(peak), max=\(maximum), warp=\(tracking.lastAlignment), expectedInverse=\(transform.inverted())")
         let badWarp = simd_float3x3(columns: (SIMD3(1,0,0), SIMD3(0,1,0), SIMD3(100,0,1)))
         do {
             _ = try StarStacker.corners(for: badWarp, size: CGSize(width:size,height:size))

@@ -235,6 +235,8 @@ final class CameraEngine: NSObject, ObservableObject, AVCaptureVideoDataOutputSa
                         decoder.baselineExposure = 0
                         decoder.boostAmount = 0
                         decoder.exposure = 0
+                        decoder.luminanceNoiseReductionAmount = 0
+                        decoder.sharpnessAmount = 0
                         decoder.scaleFactor = Float(min(1, 4096 / max(decoder.nativeSize.width, decoder.nativeSize.height)))
                         guard let decoded = decoder.outputImage else { throw self.cameraError("RAWの現像に失敗しました。") }
                         image = decoded
@@ -307,7 +309,7 @@ final class CameraEngine: NSObject, ObservableObject, AVCaptureVideoDataOutputSa
             guard camera.isExposureModeSupported(.custom) else { camera.unlockForConfiguration(); throw cameraError("手動露光に対応していません。") }
             starExposure = min(2, CMTimeGetSeconds(camera.activeFormat.maxExposureDuration))
             starISO = min(max(iso, camera.activeFormat.minISO), camera.activeFormat.maxISO)
-            if camera.isFocusModeSupported(.locked) { camera.setFocusModeLocked(lensPosition: min(max(focus, 0), 1), completionHandler: nil) }
+            if camera.isLockingFocusWithCustomLensPositionSupported { camera.setFocusModeLocked(lensPosition: min(max(focus, 0), 1), completionHandler: nil) }
             if camera.isWhiteBalanceModeSupported(.locked) { camera.whiteBalanceMode = .locked }
             starStart = Date()
             let label = "\(starRawFormat == nil ? "写真" : "RAW") · \(String(format: "%.2f", starExposure))秒 · ISO \(Int(starISO))"

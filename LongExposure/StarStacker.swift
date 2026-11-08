@@ -14,6 +14,7 @@ final class StarStacker {
     private(set) var accepted = 0
     private(set) var rejected = 0
     private(set) var lastRejection = ""
+    private(set) var lastAlignment = matrix_identity_float3x3
 
     init(context: CIContext) { self.context = context }
 
@@ -42,6 +43,7 @@ final class StarStacker {
                     warp = observation.warpTransform
                 }
                 let corners = try Self.corners(for: warp, size: small.extent.size)
+                lastAlignment = warp
                 let original = Self.rectCorners(small.extent.size)
                 for (point, old) in zip(corners, original) {
                     inset = max(inset, max(abs(point.x - old.x), abs(point.y - old.y)) / scale + 3)
