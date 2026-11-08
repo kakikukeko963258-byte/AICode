@@ -72,7 +72,7 @@ enum StarStackChecks {
             .concatenating(CGAffineTransform(translationX: 131, y: 126))
         let shifted = base.transformed(by: transform).cropped(to: CGRect(x: 0, y: 0, width: size, height: size))
         let alignedAccepted = try tracking.add(shifted)
-        require(alignedAccepted, "Translated/rotated star field was not registered")
+        require(alignedAccepted, "Translated/rotated star field was not registered: \(tracking.lastRejection)")
         let aligned = values(tracking.linearImage!)
         require(value(aligned,85,30) > 0.23, "Registration direction or rotation is wrong")
         let badWarp = simd_float3x3(columns: (SIMD3(1,0,0), SIMD3(0,1,0), SIMD3(100,0,1)))

@@ -17,7 +17,7 @@ jobs:
           xcodegen generate
       - name: Check star alignment and faint-star stacking
         run: |
-          swiftc -parse-as-library -target "$(uname -m)-apple-macosx14.0" LongExposure/StarStacker.swift Checks/StarStackChecks.swift -o /tmp/star-stack-checks
+          swiftc -O -parse-as-library -target "$(uname -m)-apple-macosx14.0" LongExposure/StarRegistration.swift LongExposure/StarStacker.swift Checks/StarStackChecks.swift -o /tmp/star-stack-checks
           /tmp/star-stack-checks
       - name: Build iPhone IPA
         run: |

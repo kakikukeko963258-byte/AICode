@@ -7,11 +7,13 @@ final class StarStacker {
     private let context: CIContext
     private let space = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
     private var reference: CGImage?
+    private var referencePoints: [CGPoint] = []
     private var mean: CIImage?
     private var bounds = CGRect.zero
     private var edgeInset: CGFloat = 2
     private(set) var accepted = 0
     private(set) var rejected = 0
+    private(set) var lastRejection = ""
 
     init(context: CIContext) { self.context = context }
 
@@ -19,19 +21,27 @@ final class StarStacker {
         let origin = input.extent.origin
         let frame = input.transformed(by: CGAffineTransform(translationX: -origin.x, y: -origin.y))
         let scale = min(1, 1024 / max(frame.extent.width, frame.extent.height))
-        let small = frame.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let scaled = frame.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let small = scaled
             .applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: 3])
             .applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0])
         guard let thumbnail = context.createCGImage(small, from: small.extent) else { throw Self.failure("位置合わせ画像を作成できません。") }
+        let points = peaks(scaled)
         var aligned = frame
         var inset = edgeInset
         if let reference {
             do {
                 // Target is the floating frame; the handler supplies the fixed reference.
-                let request = VNHomographicImageRegistrationRequest(targetedCGImage: thumbnail)
-                try VNImageRequestHandler(cgImage: reference).perform([request])
-                guard let observation = request.results?.first else { rejected += 1; return false }
-                let corners = try Self.corners(for: observation.warpTransform, size: small.extent.size)
+                let warp: simd_float3x3
+                if let t = StarRegistration.align(source: points, reference: referencePoints, size: small.extent.size) {
+                    warp = simd_float3x3(columns: (SIMD3(Float(t.a),Float(t.b),0), SIMD3(Float(t.c),Float(t.d),0), SIMD3(Float(t.tx),Float(t.ty),1)))
+                } else {
+                    let request = VNHomographicImageRegistrationRequest(targetedCGImage: thumbnail)
+                    try VNImageRequestHandler(cgImage: reference).perform([request])
+                    guard let observation = request.results?.first else { throw Self.failure("星を認識できませんでした。") }
+                    warp = observation.warpTransform
+                }
+                let corners = try Self.corners(for: warp, size: small.extent.size)
                 let original = Self.rectCorners(small.extent.size)
                 for (point, old) in zip(corners, original) {
                     inset = max(inset, max(abs(point.x - old.x), abs(point.y - old.y)) / scale + 3)
@@ -45,11 +55,13 @@ final class StarStacker {
             } catch {
                 // Never average an unregistered image into a sharp star stack.
                 rejected += 1
+                lastRejection = error.localizedDescription
                 return false
             }
         } else {
             bounds = frame.extent
             self.reference = thumbnail
+            referencePoints = points
         }
         let next = mean.map { $0.applyingFilter("CIDissolveTransition", parameters: [kCIInputTargetImageKey: aligned, kCIInputTimeKey: 1.0 / Double(accepted + 1)]) } ?? aligned
         guard let rendered = context.createCGImage(next, from: bounds, format: .RGBAh, colorSpace: space) else { throw Self.failure("星空の合成に失敗しました。") }
@@ -57,6 +69,43 @@ final class StarStacker {
         edgeInset = inset
         accepted += 1
         return true
+    }
+
+    private func peaks(_ image: CIImage) -> [CGPoint] {
+        let width = Int(image.extent.width), height = Int(image.extent.height)
+        guard width > 8, height > 8 else { return [] }
+        var rgba = [Float](repeating: 0, count: width*height*4)
+        rgba.withUnsafeMutableBytes { context.render(image, toBitmap: $0.baseAddress!, rowBytes: width*16, bounds: CGRect(x:0,y:0,width:width,height:height), format:.RGBAf, colorSpace:space) }
+        func intensity(_ x:Int,_ y:Int)->Float { rgba[(y*width+x)*4] }
+        var samples:[Float] = []
+        for y in stride(from:4,to:height-4,by:8) { for x in stride(from:4,to:width-4,by:8) { samples.append(intensity(x,y)) } }
+        samples.sort()
+        let background = samples[samples.count/2]
+        let deviations = samples.map { abs($0-background) }.sorted()
+        let threshold = background + max(0.00001, deviations[deviations.count/2] * 8)
+        var candidates:[(Float,CGPoint)] = []
+        for y in 3..<(height-3) {
+            for x in 3..<(width-3) {
+                let v = intensity(x,y)
+                guard v > threshold else { continue }
+                var maximum = true
+                for dy in -1...1 { for dx in -1...1 where dx != 0 || dy != 0 { if intensity(x+dx,y+dy) >= v { maximum = false } } }
+                guard maximum else { continue }
+                var weight:CGFloat = 0, cx:CGFloat = 0, cy:CGFloat = 0
+                for dy in -2...2 { for dx in -2...2 {
+                    let w = CGFloat(max(0,intensity(x+dx,y+dy)-background))
+                    weight += w; cx += CGFloat(x+dx)*w; cy += CGFloat(y+dy)*w
+                } }
+                if weight > 0 { candidates.append((v,CGPoint(x:cx/weight,y:cy/weight))) }
+            }
+        }
+        candidates.sort { $0.0 > $1.0 }
+        var points:[CGPoint] = []
+        for (_,point) in candidates {
+            if points.allSatisfy({ hypot($0.x-point.x,$0.y-point.y) > 6 }) { points.append(point) }
+            if points.count >= 30 { break }
+        }
+        return points
     }
 
     var linearImage: CIImage? {
