@@ -15,6 +15,10 @@ jobs:
         run: |
           brew install xcodegen
           xcodegen generate
+      - name: Check star alignment and faint-star stacking
+        run: |
+          swiftc -parse-as-library -target "$(uname -m)-apple-macosx14.0" LongExposure/StarStacker.swift Checks/StarStackChecks.swift -o /tmp/star-stack-checks
+          /tmp/star-stack-checks
       - name: Build iPhone IPA
         run: |
           set -o pipefail

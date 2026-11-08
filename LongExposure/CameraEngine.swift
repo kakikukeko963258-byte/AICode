@@ -6,7 +6,7 @@ import Photos
 import UIKit
 
 enum ExposureStyle: String, CaseIterable, Identifiable {
-    case smooth = "スロー", trails = "光跡", sensor = "センサー"
+    case stars = "星空", smooth = "スロー", trails = "光跡", sensor = "センサー"
     var id: String { rawValue }
 }
 
@@ -27,6 +27,18 @@ final class CameraEngine: NSObject, ObservableObject, AVCaptureVideoDataOutputSa
     private var lastPreview = 0.0
     private var deadline: DispatchWorkItem?
     private var configured = false
+    private var starActive = false
+    private var starStopRequested = false
+    private var starCaptureID: Int64?
+    private var starData: (Data, Bool)?
+    private var starRawFormat: OSType?
+    private var starStart = Date()
+    private var starStack: StarStacker?
+    private var starEV = 2.5
+    private var starExposure = 0.0
+    private var starISO: Float = 0
+    private var starFolder: URL?
+    private var starFailures = 0
     @Published var ready = false
     @Published var shooting = false
     @Published var processing = false
@@ -39,6 +51,8 @@ final class CameraEngine: NSObject, ObservableObject, AVCaptureVideoDataOutputSa
     @Published var sensorMax = 1.0
     @Published var sensorMin = 0.001
     @Published var permissionDenied = false
+    @Published var rejectedFrames = 0
+    @Published var starStatus = ""
 
     func start() {
         AVCaptureDevice.requestAccess(for: .video) { allowed in
@@ -83,9 +97,13 @@ final class CameraEngine: NSObject, ObservableObject, AVCaptureVideoDataOutputSa
         }
     }
 
-    func capture(seconds: Double, style: ExposureStyle, iso: Float?) {
+    func capture(seconds: Double, style: ExposureStyle, iso: Float?, starEV: Double = 2.5, focus: Float = 1) {
         queue.async {
-            guard !self.active, !self.pendingSensor, let camera = self.device, self.session.isRunning else { return }
+            guard !self.active, !self.pendingSensor, !self.starActive, let camera = self.device, self.session.isRunning else { return }
+            if style == .stars {
+                self.beginStars(seconds: seconds, iso: iso ?? 1600, ev: starEV, focus: focus)
+                return
+            }
             do {
                 try camera.lockForConfiguration()
                 if camera.isFocusModeSupported(.locked) { camera.focusMode = .locked }
@@ -162,7 +180,15 @@ final class CameraEngine: NSObject, ObservableObject, AVCaptureVideoDataOutputSa
         }
     }
 
-    func stopEarly() { queue.async { if self.active { self.finishStack() } } }
+    func stopEarly() {
+        queue.async {
+            if self.active { self.finishStack() }
+            if self.starActive {
+                self.starStopRequested = true
+                if self.starCaptureID == nil { self.finishStars() }
+            }
+        }
+    }
 
     private func finishStack() {
         guard active else { return }
@@ -175,6 +201,10 @@ final class CameraEngine: NSObject, ObservableObject, AVCaptureVideoDataOutputSa
 
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
         queue.async {
+            if self.starCaptureID == photo.resolvedSettings.uniqueID {
+                if error == nil, let data = photo.fileDataRepresentation() { self.starData = (data, photo.isRawPhoto) }
+                return
+            }
             guard self.pendingSensor else { return }
             self.pendingSensor = false
             self.deadline?.cancel()
@@ -183,6 +213,144 @@ final class CameraEngine: NSObject, ObservableObject, AVCaptureVideoDataOutputSa
             guard let data = photo.fileDataRepresentation(), let image = CIImage(data: data, options: [.applyOrientationProperty: true]) else { self.report("写真を取得できませんでした。"); return }
             self.deliver(image)
         }
+    }
+
+    func photoOutput(_ output: AVCapturePhotoOutput, didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings, error: Error?) {
+        queue.async {
+            guard self.starActive, self.starCaptureID == resolvedSettings.uniqueID else { return }
+            self.starCaptureID = nil
+            let captured = self.starData
+            self.starData = nil
+            autoreleasepool {
+                do {
+                    if let error { throw error }
+                    guard let (data, raw) = captured else { throw self.cameraError("星空写真を取得できませんでした。") }
+                    guard let folder = self.starFolder, let stack = self.starStack else { throw self.cameraError("保存先がありません。") }
+                    // Keep the untouched input separately from the developed stack.
+                    let sequence = stack.accepted + stack.rejected + 1
+                    try data.write(to: folder.appendingPathComponent(String(format: "frame-%04d.%@", sequence, raw ? "dng" : "jpg")), options: .atomic)
+                    let image: CIImage
+                    if raw {
+                        guard let decoder = CIRAWFilter(imageData: data, identifierHint: "com.adobe.raw-image") else { throw self.cameraError("RAWを現像できません。") }
+                        decoder.baselineExposure = 0
+                        decoder.boostAmount = 0
+                        decoder.exposure = 0
+                        decoder.scaleFactor = Float(min(1, 4096 / max(decoder.nativeSize.width, decoder.nativeSize.height)))
+                        guard let decoded = decoder.outputImage else { throw self.cameraError("RAWの現像に失敗しました。") }
+                        image = decoded
+                    } else {
+                        guard let decoded = CIImage(data: data, options: [.applyOrientationProperty: true]) else { throw self.cameraError("写真を読み込めません。") }
+                        let scale = min(1, 4096 / max(decoded.extent.width, decoded.extent.height))
+                        image = decoded.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+                    }
+                    _ = try stack.add(image)
+                    self.starFailures = 0
+                    let elapsed = Date().timeIntervalSince(self.starStart)
+                    let thumbnail = stack.developed(ev: self.starEV).flatMap { self.makeImage($0, scale: 0.18) }
+                    let accepted = stack.accepted, rejected = stack.rejected
+                    DispatchQueue.main.async {
+                        self.elapsed = min(elapsed, self.targetSeconds); self.frames = accepted; self.rejectedFrames = rejected; self.preview = thumbnail
+                    }
+                    if rejected >= 5 && accepted < 2 {
+                        self.starStopRequested = true
+                        DispatchQueue.main.async { self.message = "星の位置を合わせられませんでした。三脚で固定してピントを確認してください。" }
+                    }
+                } catch {
+                    self.starFailures += 1
+                    if self.starRawFormat != nil {
+                        self.starRawFormat = nil
+                        DispatchQueue.main.async { self.starStatus = "写真合成（RAW非対応）" }
+                    } else if self.starFailures >= 2 {
+                        self.starStopRequested = true
+                        DispatchQueue.main.async { self.message = error.localizedDescription }
+                    }
+                }
+            }
+            if self.starStopRequested || Date().timeIntervalSince(self.starStart) >= self.targetSeconds { self.finishStars() }
+            else { self.captureStarFrame() }
+        }
+    }
+
+    func prepare(style: ExposureStyle) {
+        queue.async {
+            guard self.configured, !self.active, !self.pendingSensor, !self.starActive else { return }
+            self.setPhotoMode(style == .stars)
+        }
+    }
+
+    private func setPhotoMode(_ enabled: Bool) {
+        guard let camera = device else { return }
+        session.beginConfiguration()
+        let preset: AVCaptureSession.Preset = enabled ? .photo : .hd1920x1080
+        if session.canSetSessionPreset(preset) { session.sessionPreset = preset }
+        let dimensions = camera.activeFormat.supportedMaxPhotoDimensions.sorted { Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height) }
+        if let preferred = dimensions.last(where: { Int64($0.width) * Int64($0.height) <= 16_000_000 }) ?? dimensions.first { photo.maxPhotoDimensions = preferred }
+        photo.maxPhotoQualityPrioritization = .quality
+        session.commitConfiguration()
+        let maximum = CMTimeGetSeconds(camera.activeFormat.maxExposureDuration)
+        let minimum = CMTimeGetSeconds(camera.activeFormat.minExposureDuration)
+        DispatchQueue.main.async { self.sensorMax = maximum; self.sensorMin = max(0.00001, minimum) }
+    }
+
+    private func beginStars(seconds: Double, iso: Float, ev: Double, focus: Float) {
+        guard let camera = device else { return }
+        do {
+            setPhotoMode(true)
+            starActive = true; starStopRequested = false; starData = nil; starFailures = 0
+            targetSeconds = seconds; starEV = ev
+            starStack = StarStacker(context: context)
+            let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            starFolder = documents.appendingPathComponent("Stars-\(Int(Date().timeIntervalSince1970))-\(UUID().uuidString.prefix(6))", isDirectory: true)
+            try FileManager.default.createDirectory(at: starFolder!, withIntermediateDirectories: true)
+            starRawFormat = photo.availableRawPhotoPixelFormatTypes.first(where: { AVCapturePhotoOutput.isBayerRAWPixelFormat($0) })
+            try camera.lockForConfiguration()
+            guard camera.isExposureModeSupported(.custom) else { camera.unlockForConfiguration(); throw cameraError("手動露光に対応していません。") }
+            starExposure = min(2, CMTimeGetSeconds(camera.activeFormat.maxExposureDuration))
+            starISO = min(max(iso, camera.activeFormat.minISO), camera.activeFormat.maxISO)
+            if camera.isFocusModeSupported(.locked) { camera.setFocusModeLocked(lensPosition: min(max(focus, 0), 1), completionHandler: nil) }
+            if camera.isWhiteBalanceModeSupported(.locked) { camera.whiteBalanceMode = .locked }
+            starStart = Date()
+            let label = "\(starRawFormat == nil ? "写真" : "RAW") · \(String(format: "%.2f", starExposure))秒 · ISO \(Int(starISO))"
+            DispatchQueue.main.async {
+                self.shooting = true; self.processing = false; self.elapsed = 0; self.frames = 0; self.rejectedFrames = 0; self.preview = nil; self.message = nil; self.starStatus = label
+                UIApplication.shared.isIdleTimerDisabled = true
+            }
+            camera.setExposureModeCustom(duration: CMTime(seconds: starExposure, preferredTimescale: 1_000_000_000), iso: starISO) { _ in
+                self.queue.async { if self.starActive { self.starStart = Date(); self.captureStarFrame() } }
+            }
+            camera.unlockForConfiguration()
+            let timeout = DispatchWorkItem { [weak self] in
+                guard let self, self.starActive else { return }
+                self.starCaptureID = nil; self.finishStars()
+            }
+            deadline = timeout
+            queue.asyncAfter(deadline: .now() + seconds + 45, execute: timeout)
+        } catch { starActive = false; starStack = nil; restoreAuto(); report(error.localizedDescription) }
+    }
+
+    private func captureStarFrame() {
+        guard starActive else { return }
+        let settings = starRawFormat.map { AVCapturePhotoSettings(rawPixelFormatType: $0) } ?? AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])
+        settings.flashMode = .off
+        settings.maxPhotoDimensions = photo.maxPhotoDimensions
+        settings.photoQualityPrioritization = starRawFormat == nil ? .quality : .speed
+        starCaptureID = settings.uniqueID
+        photo.capturePhoto(with: settings, delegate: self)
+    }
+
+    private func finishStars() {
+        guard starActive else { return }
+        starActive = false; starCaptureID = nil; deadline?.cancel()
+        defer { starStack = nil; restoreAuto() }
+        guard let stack = starStack, stack.accepted >= 2, let image = stack.developed(ev: starEV) else { report("位置合わせできる写真が2枚未満でした。三脚とピントを確認してください。撮影原本はファイルに残しています。"); return }
+        if let folder = starFolder {
+            let metadata: [String: Any] = ["accepted": stack.accepted, "rejected": stack.rejected, "exposureSeconds": starExposure, "iso": starISO, "brightenEV": starEV, "captureSeconds": Date().timeIntervalSince(starStart), "source": "real-camera-frames"]
+            do {
+                try JSONSerialization.data(withJSONObject: metadata, options: [.prettyPrinted]).write(to: folder.appendingPathComponent("capture.json"))
+                if let linear = stack.linearImage, let tiff = context.tiffRepresentation(of: linear, format: .RGBAh, colorSpace: linearSpace, options: [:]) { try tiff.write(to: folder.appendingPathComponent("stack-linear.tiff"), options: .atomic) }
+            } catch { DispatchQueue.main.async { self.message = "原本の追加保存に失敗：\(error.localizedDescription)" } }
+        }
+        deliver(image)
     }
 
     private func makeImage(_ image: CIImage, scale: CGFloat = 1) -> UIImage? {
@@ -214,6 +382,7 @@ final class CameraEngine: NSObject, ObservableObject, AVCaptureVideoDataOutputSa
     func suspend() {
         queue.async {
             if self.active { self.finishStack() }
+            if self.starActive { self.starCaptureID = nil; self.finishStars() }
             if self.pendingSensor { self.pendingSensor = false; self.restoreAuto(); self.report("撮影を中断しました。") }
             if self.session.isRunning { self.session.stopRunning() }
             DispatchQueue.main.async { self.ready = false }

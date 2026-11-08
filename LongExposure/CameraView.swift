@@ -4,8 +4,8 @@ import AVFoundation
 struct CameraView: View {
     @StateObject private var camera = CameraEngine()
     @Environment(\.scenePhase) private var scenePhase
-    @State private var style: ExposureStyle = .smooth
-    @State private var seconds = 10.0
+    @State private var style: ExposureStyle = .stars
+    @State private var seconds = 30.0
     @State private var sensorSeconds = 0.1
     @State private var iso = 100.0
     @State private var autoISO = true
@@ -13,6 +13,9 @@ struct CameraView: View {
     @State private var countdown = 0
     @State private var countdownTask: Task<Void, Never>?
     @State private var showPhoto = false
+    @State private var starISO = 1600.0
+    @State private var starEV = 2.5
+    @State private var starFocus = 1.0
     private var busy: Bool { camera.shooting || camera.processing || countdown > 0 }
     private var duration: Double { style == .sensor ? min(max(sensorSeconds, camera.sensorMin), camera.sensorMax) : seconds }
 
@@ -36,7 +39,7 @@ struct CameraView: View {
                 ZStack {
                     CameraPreview(session: camera.session)
                     if camera.shooting, let preview = camera.preview {
-                        Image(uiImage: preview).resizable().scaledToFill().frame(width: geometry.size.width, height: geometry.size.height).clipped()
+                        Image(uiImage: preview).resizable().scaledToFit().frame(width: geometry.size.width, height: geometry.size.height).background(.black)
                     }
                     if countdown > 0 { Text("\(countdown)").font(.system(size: 92, weight: .thin, design: .rounded)).shadow(radius: 8) }
                     if camera.shooting {
@@ -48,6 +51,7 @@ struct CameraView: View {
                                 Text("\(camera.elapsed, specifier: "%.1f") / \(seconds, specifier: "%.1f") 秒")
                                 ProgressView(value: min(camera.elapsed / seconds, 1))
                                 Text("\(camera.frames) フレーム").font(.caption.monospacedDigit())
+                                if style == .stars && camera.rejectedFrames > 0 { Text("位置ずれで除外 \(camera.rejectedFrames)枚").font(.caption2) }
                             }
                         }
                         .padding().background(alignment: .bottom) { LinearGradient(colors: [.clear, .black.opacity(0.8)], startPoint: .center, endPoint: .bottom) }
@@ -81,14 +85,28 @@ struct CameraView: View {
                         .disabled(busy)
                     Text("センサー上限 \(camera.sensorMax, specifier: "%.3f") 秒").font(.caption).foregroundStyle(.secondary)
                 } else {
-                    Slider(value: Binding(get: { log2(seconds) }, set: { seconds = pow(2, $0) }), in: log2(0.5)...log2(600))
+                    Slider(value: Binding(get: { log2(max(style == .stars ? 10 : 0.5, seconds)) }, set: { seconds = pow(2, $0) }), in: log2(style == .stars ? 10.0 : 0.5)...log2(600))
                         .disabled(busy)
                     HStack {
-                        ForEach([1.0, 5, 15, 30, 60, 300], id: \.self) { value in
+                        ForEach(style == .stars ? [10.0, 30, 60, 120, 300, 600] : [1.0, 5, 15, 30, 60, 300], id: \.self) { value in
                             Button(value < 60 ? "\(Int(value))秒" : "\(Int(value / 60))分") { seconds = value }
                                 .font(.caption).buttonStyle(.bordered).tint(seconds == value ? .yellow : .gray)
                         }
                     }.disabled(busy)
+                }
+
+                if style == .stars {
+                    DisclosureGroup("星空の設定") {
+                        VStack(spacing: 8) {
+                            HStack { Text("ISO"); Spacer(); Text("\(Int(starISO))").monospacedDigit() }
+                            Slider(value: $starISO, in: 100...6400, step: 100)
+                            HStack { Text("明るさ"); Spacer(); Text("+\(starEV, specifier: "%.1f") EV").monospacedDigit() }
+                            Slider(value: $starEV, in: 0...6, step: 0.25)
+                            HStack { Text("遠景ピント"); Spacer(); Text("\(starFocus, specifier: "%.2f")").monospacedDigit() }
+                            Slider(value: $starFocus, in: 0.75...1, step: 0.005)
+                        }.font(.caption)
+                    }.font(.subheadline).disabled(busy)
+                    if !camera.starStatus.isEmpty { Text(camera.starStatus).font(.caption.monospacedDigit()).foregroundStyle(.secondary) }
                 }
 
                 if style == .sensor {
@@ -126,12 +144,17 @@ struct CameraView: View {
                 }
             }.padding(.horizontal)
 
-            Text(camera.message ?? (style == .smooth ? "三脚で固定して、水や雲をなめらかに" : style == .trails ? "三脚で固定して、光の軌跡を残す" : "1枚の写真をセンサーで露光"))
+            Text(camera.message ?? (style == .stars ? "三脚で固定し、空に向けて撮影" : style == .smooth ? "三脚で固定して、水や雲をなめらかに" : style == .trails ? "三脚で固定して、光の軌跡を残す" : "1枚の写真をセンサーで露光"))
                 .font(.caption).foregroundStyle(camera.message == nil ? .secondary : .primary)
                 .multilineTextAlignment(.center).padding(.horizontal).frame(minHeight: 28)
         }
         .padding(.vertical, 10).background(.black).tint(.yellow)
         .onAppear { camera.start() }
+        .onChange(of: camera.ready) { _, ready in if ready { camera.prepare(style: style) } }
+        .onChange(of: style) { _, newStyle in
+            if newStyle == .stars { seconds = max(10, seconds) }
+            camera.prepare(style: newStyle)
+        }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { camera.start() }
             else { countdownTask?.cancel(); countdown = 0; camera.suspend() }
@@ -161,7 +184,7 @@ struct CameraView: View {
             }
             countdown = 0
             guard !Task.isCancelled else { return }
-            camera.capture(seconds: duration, style: style, iso: style == .sensor && !autoISO ? Float(iso) : nil)
+            camera.capture(seconds: duration, style: style, iso: style == .stars ? Float(starISO) : style == .sensor && !autoISO ? Float(iso) : nil, starEV: starEV, focus: Float(starFocus))
         }
     }
 }
