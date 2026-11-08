@@ -1,0 +1,36 @@
+name: Long Exposure IPA
+on:
+  push:
+    branches: [long-exposure]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+      - name: Build iPhone IPA
+        run: |
+          set -o pipefail
+          xcodebuild archive -project LongExposure.xcodeproj -scheme LongExposure -configuration Release -destination 'generic/platform=iOS' -archivePath build/LongExposure.xcarchive CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY='' 2>&1 | tee build.log
+          mkdir -p build/Payload
+          cp -R build/LongExposure.xcarchive/Products/Applications/LongExposure.app build/Payload/
+          cd build
+          zip -r -y LongExposure-unsigned.ipa Payload
+          unzip -t LongExposure-unsigned.ipa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LongExposure-unsigned
+          path: build/LongExposure-unsigned.ipa
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: LongExposure-build-log
+          path: build.log
