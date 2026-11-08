@@ -98,7 +98,8 @@ final class StarStacker {
                     let w = CGFloat(max(0,intensity(x+dx,y+dy)-background))
                     weight += w; cx += CGFloat(x+dx)*w; cy += CGFloat(y+dy)*w
                 } }
-                if weight > 0 { candidates.append((v,CGPoint(x:cx/weight,y:cy/weight))) }
+                // Bitmap scanlines start at the top; Core Image coordinates start below.
+                if weight > 0 { candidates.append((v,CGPoint(x:cx/weight+0.5,y:CGFloat(height)-0.5-cy/weight))) }
             }
         }
         candidates.sort { $0.0 > $1.0 }

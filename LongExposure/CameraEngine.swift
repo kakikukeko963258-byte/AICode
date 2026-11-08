@@ -226,9 +226,9 @@ final class CameraEngine: NSObject, ObservableObject, AVCaptureVideoDataOutputSa
                     if let error { throw error }
                     guard let (data, raw) = captured else { throw self.cameraError("星空写真を取得できませんでした。") }
                     guard let folder = self.starFolder, let stack = self.starStack else { throw self.cameraError("保存先がありません。") }
-                    // Keep the untouched input separately from the developed stack.
+                    // Keep the reference original; avoid unbounded DNG disk usage.
                     let sequence = stack.accepted + stack.rejected + 1
-                    try data.write(to: folder.appendingPathComponent(String(format: "frame-%04d.%@", sequence, raw ? "dng" : "jpg")), options: .atomic)
+                    if sequence == 1 { try data.write(to: folder.appendingPathComponent(raw ? "reference.dng" : "reference.jpg"), options: .atomic) }
                     let image: CIImage
                     if raw {
                         guard let decoder = CIRAWFilter(imageData: data, identifierHint: "com.adobe.raw-image") else { throw self.cameraError("RAWを現像できません。") }

@@ -70,7 +70,9 @@ enum StarStackChecks {
         let transform = CGAffineTransform(translationX: -128, y: -128)
             .concatenating(CGAffineTransform(rotationAngle: angle))
             .concatenating(CGAffineTransform(translationX: 131, y: 126))
-        let shifted = base.transformed(by: transform).cropped(to: CGRect(x: 0, y: 0, width: size, height: size))
+        let sensorBounds = CGRect(x: 0, y: 0, width: size, height: size)
+        let shifted = base.transformed(by: transform)
+            .composited(over: CIImage(color: .black).cropped(to: sensorBounds)).cropped(to: sensorBounds)
         let sourcePoints = stars.map { CGPoint(x:$0.0,y:$0.1).applying(transform) }
         let referencePoints = stars.map { CGPoint(x:$0.0,y:$0.1) }
         let geometric = StarRegistration.align(source:sourcePoints,reference:referencePoints,size:CGSize(width:size,height:size))
