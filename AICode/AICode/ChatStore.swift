@@ -88,7 +88,14 @@ final class ChatStore {
                 applyExtractedContent(from: full)
                 isStreaming = false
             } catch {
-                messages[assistantIndex].text = "エラー: \(error.localizedDescription)"
+                var text = "エラー: \(error.localizedDescription)"
+                // For the language error, attach the device's actual
+                // language state so it can be screenshotted and
+                // reported instead of guessed.
+                if error.localizedDescription.contains("対応言語と端末の言語設定") {
+                    text += "\n\n【診断情報】\n\(service.diagnosticsSummary)"
+                }
+                messages[assistantIndex].text = text
                 errorMessage = error.localizedDescription
                 isStreaming = false
             }

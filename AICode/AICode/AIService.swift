@@ -46,7 +46,7 @@ final class AIService {
     /// `UIDescription.swift`. Anything outside that set is ignored
     /// by the preview renderer — by design, so arbitrary code can
     /// never run.
-    static let instructions = """
+    static let instructionsJA = """
     あなたは SwiftUI のコーディングアシスタントです。日本語で、簡潔に答えてください。
     コードを出すときは ```swift フェンスで囲んでください。
     画面のUIを作るよう頼まれたときは、コードに加えて、プレビュー用のUI記述も ```json フェンスで出してください。
@@ -65,6 +65,84 @@ final class AIService {
     font は title, title2, title3, headline, body, callout, subheadline, footnote, caption, largeTitle のいずれか。
     JSON は必ず有効な JSON 1個だけにしてください。JSON の中に Swift コードを混ぜないでください。
     """
+
+    /// English version of the instructions. Used when the on-device
+    /// model's supported languages do not include Japanese: sessions
+    /// whose instructions use an unsupported language make every
+    /// request fail with `unsupportedLanguageOrLocale`, so the
+    /// instructions follow the model, and the model is asked to
+    /// answer in the user's language instead.
+    static let instructionsEN = """
+    You are a SwiftUI coding assistant. Reply concisely. If the user writes in Japanese, reply in Japanese.
+    When you output code, wrap it in a ```swift fence.
+    When asked to create a UI screen, in addition to the code also output a preview UI description in a ```json fence.
+    The JSON must use ONLY this shape: {"type":"VStack","spacing":16,"padding":16,"children":[...]}
+    Allowed type values: VStack, HStack, ZStack, Text, Button, Image, Spacer, Divider, TextField, Toggle, Slider, List
+    Text: {"type":"Text","text":"Hello","font":"title","color":"blue","bold":true}
+    Button: {"type":"Button","title":"+1","color":"red","action":"increment"} — action is one of increment / decrement / reset / toggle / none
+    Image: {"type":"Image","systemName":"star.fill","color":"yellow"}
+    TextField: {"type":"TextField","placeholder":"Name"}
+    Toggle: {"type":"Toggle","label":"Turn on"}
+    Slider: {"type":"Slider","value":0.5}
+    List: {"type":"List","items":["Buy milk","Take out trash"]}
+    In a Text that shows the counter, write "{counter}" (example: "Count: {counter}").
+    Colors are one of red, blue, green, orange, purple, pink, yellow, gray, black, white or "#RRGGBB".
+    font is one of title, title2, title3, headline, body, callout, subheadline, footnote, caption, largeTitle.
+    Output exactly one valid JSON object. Do not mix Swift code into the JSON.
+    """
+
+    /// Whether the on-device model's supported languages include
+    /// Japanese. `supportedLanguages` reflects the Apple Intelligence
+    /// language configured on the device.
+    static var modelSupportsJapanese: Bool {
+        SystemLanguageModel.default.supportedLanguages.contains {
+            $0.minimalIdentifier.hasPrefix("ja")
+        }
+    }
+
+    /// Instructions for a new session, in a language the model
+    /// supports: Japanese when supported, English otherwise.
+    static var defaultInstructions: String {
+        modelSupportsJapanese ? instructionsJA : instructionsEN
+    }
+
+    /// Maps a Foundation Models generation error to a user-facing
+    /// error with a clear Japanese explanation, when one is known.
+    static func mapGenerationError(_ error: Error) -> Error {
+        guard let generationError = error as? LanguageModelSession.GenerationError else {
+            return error
+        }
+        switch generationError {
+        case .unsupportedLanguageOrLocale:
+            return AIError.unavailable("AIの対応言語と端末の言語設定が合っていないようです。「設定」>「Apple IntelligenceとSiri」で言語を日本語に設定してから、もう一度お試しください。")
+        case .guardrailViolation:
+            return AIError.unavailable("その内容には回答できませんでした。別の聞き方を試してください。")
+        case .assetsUnavailable:
+            return AIError.unavailable("オンデバイスモデルを準備中です。しばらく待ってからもう一度お試しください。")
+        case .concurrentRequests:
+            return AIError.unavailable("AIが回答中です。終わるまでお待ちください。")
+        default:
+            return error
+        }
+    }
+
+    /// Short diagnostics snapshot shown to the user when a language
+    /// error occurs, so the device's actual language state can be
+    /// reported back instead of guessed.
+    var diagnosticsSummary: String {
+        let model = SystemLanguageModel.default
+        let languages = model.supportedLanguages
+            .map(\.minimalIdentifier)
+            .sorted()
+            .joined(separator: ", ")
+        return "対応言語: \(languages)\n端末ロケール: \(Locale.current.identifier)\nロケール対応: \(model.supportsLocale() ? "はい" : "いいえ")"
+    }
+
+    private var usingEnglishInstructions = false
+    /// Fallback stage for language errors: 0 = locale phrase +
+    /// supported-language instructions, 1 = English instructions,
+    /// 2 = no instructions at all.
+    private var fallbackStage = 0
 
     private var session: LanguageModelSession?
 
@@ -90,8 +168,46 @@ final class AIService {
     }
 
     /// Start (or restart) a chat session, e.g. for a new conversation.
+    /// Instructions use a language the model supports, prefixed with
+    /// Apple's recommended locale phrase ("The person's locale is
+    /// ja_JP.") for non-U.S.-English locales.
     func startSession() {
-        session = LanguageModelSession(instructions: Self.instructions)
+        fallbackStage = 0
+        startSession(english: !Self.modelSupportsJapanese)
+    }
+
+    func startSession(english: Bool) {
+        usingEnglishInstructions = english
+        let body = english ? Self.instructionsEN : Self.instructionsJA
+        session = LanguageModelSession(instructions: Self.localePhrase + body)
+    }
+
+    /// Advances the language fallback chain after an
+    /// `unsupportedLanguageOrLocale` error. Returns false when the
+    /// chain is exhausted.
+    private func advanceFallback() -> Bool {
+        fallbackStage += 1
+        switch fallbackStage {
+        case 1:
+            startSession(english: true)
+            return true
+        case 2:
+            usingEnglishInstructions = true
+            session = LanguageModelSession()
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// The exact locale phrase from Apple's Foundation Models
+    /// language guidance; empty for U.S. English.
+    private static var localePhrase: String {
+        let locale = Locale.current
+        if Locale.Language(identifier: "en_US").isEquivalent(to: locale.language) {
+            return ""
+        }
+        return "The person's locale is \(locale.identifier).\n"
     }
 
     /// Send a prompt and stream the reply. `onPartial` is called with
@@ -107,6 +223,25 @@ final class AIService {
         if session == nil {
             startSession()
         }
+        // Walk the language fallback chain (English instructions,
+        // then no instructions) on `unsupportedLanguageOrLocale`
+        // before giving up and surfacing the mapped, friendly message.
+        while true {
+            do {
+                return try await streamOnce(prompt, onPartial: onPartial)
+            } catch let generationError as LanguageModelSession.GenerationError {
+                if case .unsupportedLanguageOrLocale = generationError, advanceFallback() {
+                    continue
+                }
+                throw Self.mapGenerationError(generationError)
+            }
+        }
+    }
+
+    private func streamOnce(
+        _ prompt: String,
+        onPartial: @escaping (String) -> Void
+    ) async throws -> String {
         guard let session else { throw AIError.notSupported }
         guard !session.isResponding else { throw AIError.unavailable("AIが回答中です。終わるまでお待ちください。") }
 
@@ -130,9 +265,13 @@ final class AIService {
             startSession()
         }
         guard let session else { throw AIError.notSupported }
-        let response = try await session.respond(to: prompt)
-        let content = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !content.isEmpty else { throw AIError.emptyResponse }
-        return response.content
+        do {
+            let response = try await session.respond(to: prompt)
+            let content = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !content.isEmpty else { throw AIError.emptyResponse }
+            return response.content
+        } catch {
+            throw Self.mapGenerationError(error)
+        }
     }
 }
