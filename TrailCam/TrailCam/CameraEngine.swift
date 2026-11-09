@@ -159,7 +159,7 @@ final class CameraEngine: NSObject, ObservableObject {
         device.setExposureModeCustom(duration: duration, iso: iso)
     }
 
-    private func withDevice(_ body: (AVCaptureDevice) -> Void) {
+    private func withDevice(_ body: @escaping (AVCaptureDevice) -> Void) {
         videoQueue.async { [weak self] in
             guard let self, let device = self.captureDevice else { return }
             do {
