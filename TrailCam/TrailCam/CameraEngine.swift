@@ -33,6 +33,15 @@ final class CameraEngine: NSObject, ObservableObject {
     @Published var statusText = "カメラを準備中…"
     @Published var saveMessage: String?
     @Published var cameraAvailable = false
+    /// 接続中カメラのISO範囲（UIのスライダー用に公開）
+    @Published var isoMin: Float = 0
+    @Published var isoMax: Float = 0
+
+    private var captureDevice: AVCaptureDevice?
+    private var focusManualEnabled = false
+    private var isoManualEnabled = true
+    private var manualISOValue: Float = 100
+    private let frameDuration = CMTime(value: 1, timescale: 6) // 約0.17秒/フレーム
 
     // UIから設定される値（撮影開始時に videoQueue 側へ取り込む）
     var mode: CaptureMode = .trails
@@ -119,28 +128,107 @@ final class CameraEngine: NSObject, ObservableObject {
         }
     }
 
-    /// 夜景向け: ISOを低く保ち、1フレームを長めに露光し、ピントは遠方に固定する。
+    /// 初期設定: ピントは連続オート（タップAFが効く状態）、
+    /// ISOは低めの手動値（夜景の光跡向け）から始める。
     private func configureDevice(_ device: AVCaptureDevice) {
+        captureDevice = device
+        let format = device.activeFormat
+        manualISOValue = format.minISO + (format.maxISO - format.minISO) * 0.15
+        DispatchQueue.main.async {
+            self.isoMin = format.minISO
+            self.isoMax = format.maxISO
+        }
         do {
             try device.lockForConfiguration()
             defer { device.unlockForConfiguration() }
-            if device.isFocusModeSupported(.locked) {
-                device.setFocusModeLocked(lensPosition: 1.0)
+            if device.isFocusModeSupported(.continuousAutoFocus) {
+                device.focusMode = .continuousAutoFocus
             }
-            if device.isExposureModeSupported(.custom) {
-                let maxDuration = device.activeFormat.maxExposureDuration
-                let wanted = CMTime(value: 1, timescale: 6) // 約0.17秒/フレーム
-                let duration = CMTimeCompare(wanted, maxDuration) == 1 ? maxDuration : wanted
-                let iso = device.activeFormat.minISO + (device.activeFormat.maxISO - device.activeFormat.minISO) * 0.15
-                device.setExposureModeCustom(duration: duration, iso: iso)
-            } else if device.isExposureModeSupported(.locked) {
-                device.exposureMode = .locked
-            }
-            if device.isWhiteBalanceModeSupported(.locked) {
-                device.whiteBalanceMode = .locked
-            }
+            applyCustomExposureLocked(device)
         } catch {
             // 設定できなくても自動露光で撮影は続行する
+        }
+    }
+
+    /// ロック取得済みの状態で手動露光（固定フレーム時間＋現在の手動ISO）を適用する。
+    private func applyCustomExposureLocked(_ device: AVCaptureDevice) {
+        guard device.isExposureModeSupported(.custom) else { return }
+        let maxDuration = device.activeFormat.maxExposureDuration
+        let duration = CMTimeCompare(frameDuration, maxDuration) == 1 ? maxDuration : frameDuration
+        let iso = min(device.activeFormat.maxISO, max(device.activeFormat.minISO, manualISOValue))
+        device.setExposureModeCustom(duration: duration, iso: iso)
+    }
+
+    private func withDevice(_ body: (AVCaptureDevice) -> Void) {
+        videoQueue.async { [weak self] in
+            guard let self, let device = self.captureDevice else { return }
+            do {
+                try device.lockForConfiguration()
+                defer { device.unlockForConfiguration() }
+                body(device)
+            } catch {
+                // ロックに失敗した変更は次回に持ち越す
+            }
+        }
+    }
+
+    // MARK: - 手動コントロール（UIから呼ぶ）
+
+    /// プレビューのタップ位置（0〜1に正規化、表示画像基準）でピントを合わせる。
+    /// ISOがオートのときは露出もその地点に合わせる。
+    func focusAtDisplayPoint(_ normalized: CGPoint) {
+        // 表示はセンサー画像を90度回転したものなので座標を変換する
+        let devicePoint = CGPoint(x: normalized.y, y: 1 - normalized.x)
+        withDevice { [weak self] device in
+            guard let self else { return }
+            if !self.focusManualEnabled, device.isFocusPointOfInterestSupported {
+                device.focusPointOfInterest = devicePoint
+                if device.isFocusModeSupported(.autoFocus) {
+                    device.focusMode = .autoFocus
+                }
+            }
+            if !self.isoManualEnabled, device.isExposurePointOfInterestSupported {
+                device.exposurePointOfInterest = devicePoint
+                if device.isExposureModeSupported(.continuousAutoExposure) {
+                    device.exposureMode = .continuousAutoExposure
+                }
+            }
+        }
+    }
+
+    func setFocusAuto() {
+        focusManualEnabled = false
+        withDevice { device in
+            if device.isFocusModeSupported(.continuousAutoFocus) {
+                device.focusMode = .continuousAutoFocus
+            }
+        }
+    }
+
+    /// lensPosition: 0.0 = 最至近、1.0 = 無限遠
+    func setFocusManual(lensPosition: Float) {
+        focusManualEnabled = true
+        withDevice { device in
+            if device.isFocusModeSupported(.locked) {
+                device.setFocusModeLocked(lensPosition: min(1, max(0, lensPosition)))
+            }
+        }
+    }
+
+    func setISOAuto() {
+        isoManualEnabled = false
+        withDevice { device in
+            if device.isExposureModeSupported(.continuousAutoExposure) {
+                device.exposureMode = .continuousAutoExposure
+            }
+        }
+    }
+
+    func setISOManual(_ iso: Float) {
+        isoManualEnabled = true
+        manualISOValue = iso
+        withDevice { [weak self] device in
+            self?.applyCustomExposureLocked(device)
         }
     }
 

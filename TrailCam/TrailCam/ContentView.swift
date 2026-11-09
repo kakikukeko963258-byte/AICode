@@ -7,6 +7,19 @@ struct ContentView: View {
     @State private var gradeSelection: GradeStyle = .cyber
     @State private var showTips = false
     @State private var shareURL: URL?
+    // ピント / ISO の手動コントロール
+    @State private var focusIsManual = false
+    @State private var lensPosition: Double = 1.0
+    @State private var isoIsManual = true
+    @State private var isoValue: Double = 100
+    @State private var isoInitialized = false
+    @State private var focusIndicator: CGPoint?
+
+    private var isoRange: ClosedRange<Double> {
+        engine.isoMax > engine.isoMin
+            ? Double(engine.isoMin)...Double(engine.isoMax)
+            : 50...3200
+    }
 
     private let durations: [(value: Double, label: String)] = [
         (3, "3秒"), (5, "5秒"), (10, "10秒"), (15, "15秒"), (30, "30秒"), (0, "∞")
@@ -16,12 +29,42 @@ struct ContentView: View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            // プレビュー / 蓄積中の合成画像
+            // プレビュー / 蓄積中の合成画像（タップでピントを合わせる）
             if let image = engine.previewImage {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-                    .ignoresSafeArea()
+                GeometryReader { geo in
+                    ZStack {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: geo.size.width, height: geo.size.height)
+                            .clipped()
+                            .contentShape(Rectangle())
+                            .onTapGesture { location in
+                                let normalized = CGPoint(
+                                    x: location.x / max(1, geo.size.width),
+                                    y: location.y / max(1, geo.size.height)
+                                )
+                                engine.focusAtDisplayPoint(normalized)
+                                withAnimation(.easeOut(duration: 0.15)) {
+                                    focusIndicator = location
+                                }
+                                Task {
+                                    try? await Task.sleep(nanoseconds: 1_200_000_000)
+                                    if focusIndicator == location {
+                                        withAnimation { focusIndicator = nil }
+                                    }
+                                }
+                            }
+                        if let point = focusIndicator {
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(Color.yellow, lineWidth: 2)
+                                .frame(width: 74, height: 74)
+                                .position(point)
+                                .allowsHitTesting(false)
+                        }
+                    }
+                }
+                .ignoresSafeArea()
             } else {
                 VStack(spacing: 12) {
                     Image(systemName: "camera.aperture")
@@ -58,6 +101,26 @@ struct ContentView: View {
         .onChange(of: modeSelection) { _, newValue in engine.mode = newValue }
         .onChange(of: gradeSelection) { _, newValue in engine.gradeStyle = newValue }
         .onChange(of: durationSelection) { _, newValue in engine.durationSeconds = newValue }
+        .onChange(of: focusIsManual) { _, manual in
+            if manual { engine.setFocusManual(lensPosition: Float(lensPosition)) }
+            else { engine.setFocusAuto() }
+        }
+        .onChange(of: lensPosition) { _, newValue in
+            if focusIsManual { engine.setFocusManual(lensPosition: Float(newValue)) }
+        }
+        .onChange(of: isoIsManual) { _, manual in
+            if manual { engine.setISOManual(Float(isoValue)) }
+            else { engine.setISOAuto() }
+        }
+        .onChange(of: isoValue) { _, newValue in
+            if isoIsManual { engine.setISOManual(Float(newValue)) }
+        }
+        .onChange(of: engine.isoMax) { _, _ in
+            if !isoInitialized, engine.isoMax > engine.isoMin {
+                isoInitialized = true
+                isoValue = Double(engine.isoMin + (engine.isoMax - engine.isoMin) * 0.15)
+            }
+        }
         .sheet(isPresented: $showTips) { tipsSheet }
     }
 
@@ -158,6 +221,63 @@ struct ContentView: View {
                     .disabled(engine.isCapturing)
                 }
             }
+
+            // ピント: オート（タップAF） / 手動（レンズ位置スライダー）
+            HStack(spacing: 10) {
+                Text("ピント")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 44, alignment: .leading)
+                Picker("ピント", selection: $focusIsManual) {
+                    Text("オート").tag(false)
+                    Text("手動").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 132)
+                if focusIsManual {
+                    Text("近").font(.caption).foregroundStyle(.white.opacity(0.7))
+                    Slider(value: $lensPosition, in: 0...1)
+                        .tint(.yellow)
+                    Text(lensPosition >= 0.99 ? "∞" : String(format: "%.2f", lensPosition))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.white)
+                        .frame(width: 34)
+                } else {
+                    Text("プレビューをタップで合わせる")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.7))
+                    Spacer()
+                }
+            }
+            .disabled(engine.isCapturing)
+
+            // ISO: オート / 手動（スライダー）
+            HStack(spacing: 10) {
+                Text("ISO")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 44, alignment: .leading)
+                Picker("ISO", selection: $isoIsManual) {
+                    Text("オート").tag(false)
+                    Text("手動").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 132)
+                if isoIsManual {
+                    Slider(value: $isoValue, in: isoRange)
+                        .tint(.yellow)
+                    Text("\(Int(isoValue))")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.white)
+                        .frame(width: 40)
+                } else {
+                    Text("明るさは自動調整")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.7))
+                    Spacer()
+                }
+            }
+            .disabled(engine.isCapturing)
 
             // シャッター
             Button {
@@ -263,6 +383,7 @@ struct ContentView: View {
                     Label("iPhoneを三脚や手すりに固定して絶対に動かさない", systemImage: "tripod")
                     Label("モードは「光跡」、時間は10〜30秒がおすすめ", systemImage: "timer")
                     Label("色味は「サイバー」で青とオレンジの夜景になる", systemImage: "paintpalette")
+                    Label("ピントは合わせたい場所をタップ。遠景なら手動で∞、ISOは手動で低めが光跡向き", systemImage: "scope")
                     Label("車が流れ続けているタイミングで撮る。信号で止まると光跡も止まる", systemImage: "car.2")
                 }
                 Section("仕組み") {
