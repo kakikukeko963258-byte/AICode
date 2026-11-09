@@ -81,13 +81,15 @@ final class CameraEngine: NSObject, ObservableObject {
         isConfigured = true
         videoQueue.async { [weak self] in
             guard let self else { return }
+            // 注意: startRunning は beginConfiguration〜commitConfiguration の
+            // 外で呼ばなければならない（中だと例外でクラッシュする）。
             self.session.beginConfiguration()
             self.session.sessionPreset = .high
-            defer { self.session.commitConfiguration() }
 
             guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
                   let input = try? AVCaptureDeviceInput(device: device),
                   self.session.canAddInput(input) else {
+                self.session.commitConfiguration()
                 DispatchQueue.main.async { self.statusText = "背面カメラが見つかりません（実機で使ってください）" }
                 return
             }
@@ -98,13 +100,17 @@ final class CameraEngine: NSObject, ObservableObject {
             output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
             output.alwaysDiscardsLateVideoFrames = true
             output.setSampleBufferDelegate(self, queue: self.videoQueue)
-            guard self.session.canAddOutput(output) else { return }
+            guard self.session.canAddOutput(output) else {
+                self.session.commitConfiguration()
+                return
+            }
             self.session.addOutput(output)
             if let connection = output.connection(with: .video) {
                 if connection.isVideoRotationAngleSupported(90) {
                     connection.videoRotationAngle = 90
                 }
             }
+            self.session.commitConfiguration()
             self.session.startRunning()
             DispatchQueue.main.async {
                 self.cameraAvailable = true
