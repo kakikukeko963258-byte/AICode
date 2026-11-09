@@ -48,6 +48,8 @@ final class AIService {
     /// never run.
     static let instructionsJA = """
     あなたは SwiftUI のコーディングアシスタントです。日本語で、簡潔に答えてください。
+    コードやUI記述は、ユーザーが画面やコードを作るよう頼んだときだけ出してください。挨拶や普通の質問には、コードを出さず文章だけで答えてください。
+    直前の自分の回答を繰り返さず、必ずユーザーの最新の発言に答えてください。
     コードを出すときは ```swift フェンスで囲んでください。
     画面のUIを作るよう頼まれたときは、コードに加えて、プレビュー用のUI記述も ```json フェンスで出してください。
     JSON は次の形だけを使ってください（これ以外の部品・キーは使いません）:
@@ -74,6 +76,8 @@ final class AIService {
     /// answer in the user's language instead.
     static let instructionsEN = """
     You are a SwiftUI coding assistant. Reply concisely. If the user writes in Japanese, reply in Japanese.
+    Only output code or a UI description when the user asks you to create a screen or code. For greetings and ordinary questions, answer in plain text without code.
+    Never repeat your previous answer; always respond to the user's latest message.
     When you output code, wrap it in a ```swift fence.
     When asked to create a UI screen, in addition to the code also output a preview UI description in a ```json fence.
     The JSON must use ONLY this shape: {"type":"VStack","spacing":16,"padding":16,"children":[...]}
@@ -137,6 +141,18 @@ final class AIService {
             .joined(separator: ", ")
         return "対応言語: \(languages)\n端末ロケール: \(Locale.current.identifier)\nロケール対応: \(model.supportsLocale() ? "はい" : "いいえ")"
     }
+
+    /// Generation options for every request. Random sampling with a
+    /// temperature keeps replies from collapsing into the same output
+    /// every time (the default sampling is near-deterministic, and the
+    /// small on-device model otherwise echoes its previous answer).
+    /// The token cap keeps one reply from filling the ~4k context
+    /// window and crowding out the rest of the conversation.
+    static let generationOptions = GenerationOptions(
+        sampling: .random(probabilityThreshold: 0.9),
+        temperature: 0.7,
+        maximumResponseTokens: 1600
+    )
 
     private var usingEnglishInstructions = false
     /// Fallback stage for language errors: 0 = locale phrase +
@@ -246,7 +262,7 @@ final class AIService {
         guard !session.isResponding else { throw AIError.unavailable("AIが回答中です。終わるまでお待ちください。") }
 
         var full = ""
-        let stream = session.streamResponse(to: prompt)
+        let stream = session.streamResponse(to: prompt, options: Self.generationOptions)
         for try await partial in stream {
             full = partial.content
             onPartial(full)
@@ -266,7 +282,7 @@ final class AIService {
         }
         guard let session else { throw AIError.notSupported }
         do {
-            let response = try await session.respond(to: prompt)
+            let response = try await session.respond(to: prompt, options: Self.generationOptions)
             let content = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !content.isEmpty else { throw AIError.emptyResponse }
             return response.content
