@@ -287,7 +287,10 @@ final class CameraEngine: NSObject, ObservableObject {
     // MARK: - 保存
 
     func saveFinal() {
-        guard let image = finalImage, let data = image.jpegData(compressionQuality: 0.92) else { return }
+        guard let image = finalImage, let data = image.jpegData(compressionQuality: 0.92) else {
+            DispatchQueue.main.async { self.saveMessage = "保存できる画像がまだありません" }
+            return
+        }
         PHPhotoLibrary.requestAuthorization(for: .addOnly) { [weak self] status in
             guard status == .authorized || status == .limited else {
                 DispatchQueue.main.async { self?.saveMessage = "写真への保存が許可されていません" }
@@ -332,8 +335,8 @@ extension CameraEngine: AVCaptureVideoDataOutputSampleBufferDelegate {
         guard let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         var frame = CIImage(cvPixelBuffer: buffer)
 
-        // 蓄積サイズを最大1920pxに抑えて処理を軽くする
-        let maxDimension: CGFloat = 1920
+        // 蓄積サイズを最大1600pxに抑えて処理を軽くする
+        let maxDimension: CGFloat = 1600
         let longest = max(frame.extent.width, frame.extent.height)
         if longest > maxDimension {
             let scale = maxDimension / longest
@@ -342,10 +345,11 @@ extension CameraEngine: AVCaptureVideoDataOutputSampleBufferDelegate {
 
         let now = Date()
         if capturingFlag {
+            var merged: CIImage
             if let acc = accumulated {
                 switch activeMode {
                 case .trails:
-                    accumulated = frame.applyingFilter("CILightenBlendMode", parameters: [
+                    merged = frame.applyingFilter("CILightenBlendMode", parameters: [
                         kCIInputBackgroundImageKey: acc
                     ])
                 case .average:
@@ -357,12 +361,20 @@ extension CameraEngine: AVCaptureVideoDataOutputSampleBufferDelegate {
                         "inputAVector": CIVector(x: 0, y: 0, z: 0, w: weight),
                         "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 0)
                     ])
-                    accumulated = faded.applyingFilter("CISourceOverCompositing", parameters: [
+                    merged = faded.applyingFilter("CISourceOverCompositing", parameters: [
                         kCIInputBackgroundImageKey: acc
                     ])
                 }
             } else {
-                accumulated = frame
+                merged = frame
+            }
+            // 重要: 合成結果を毎フレーム実体化（レンダリング）して平坦化する。
+            // フィルタを重ねただけのCIImageを持ち回すとグラフが際限なく育ち、
+            // 数秒で描画が詰まって撮影が止まり、メモリも圧迫して保存まで失敗する。
+            if let cg = ciContext.createCGImage(merged, from: merged.extent) {
+                accumulated = CIImage(cgImage: cg)
+            } else {
+                accumulated = merged
             }
             frameCount += 1
 
