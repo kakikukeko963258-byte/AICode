@@ -21,6 +21,19 @@ final class MoshEngine {
         var moshSeconds: Double = 1.5
         var intensity: Double = 0.7   // 0...1
         var blockSize: Double = 16    // マスクのブロック（ピクセル）
+        // トリミング: 開始位置（秒）と使う長さ（秒）。長さ0以下は最後まで
+        var aStart: Double = 0
+        var aLength: Double = 0
+        var bStart: Double = 0
+        var bLength: Double = 0
+    }
+
+    /// 元の長さから、実際に使う区間（開始・長さ）を求める
+    static func usedRange(duration: Double, start: Double, length: Double) -> (start: Double, length: Double) {
+        let safeDuration = max(0.1, duration)
+        let s = min(max(0, start), max(0, safeDuration - 0.1))
+        let l = length > 0 ? min(length, safeDuration - s) : safeDuration - s
+        return (s, max(0.1, l))
     }
 
     enum MoshError: LocalizedError {
@@ -79,12 +92,18 @@ final class MoshEngine {
         let displayA = Self.displaySize(of: trackA)
         let canvas = Self.canvasSize(from: displayA, maxSide: 1280)
         let canvasRect = CGRect(origin: .zero, size: canvas)
-        let totalSeconds = max(0.1, assetA.duration.seconds + assetB.duration.seconds)
+        // トリミング後の区間で全体の長さを計算する
+        let rangeA = Self.usedRange(duration: assetA.duration.seconds,
+                                    start: settings.aStart, length: settings.aLength)
+        let rangeB = Self.usedRange(duration: assetB.duration.seconds,
+                                    start: settings.bStart, length: settings.bLength)
+        let totalSeconds = max(0.1, rangeA.length + rangeB.length)
 
         let silentURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("mosh-silent-\(UUID().uuidString).mp4")
         let aEndTime = try renderVideo(assetA: assetA, trackA: trackA,
                                        assetB: assetB, trackB: trackB,
+                                       rangeA: rangeA, rangeB: rangeB,
                                        canvas: canvas, canvasRect: canvasRect,
                                        settings: settings, totalSeconds: totalSeconds,
                                        outputURL: silentURL, progress: progress)
@@ -100,7 +119,7 @@ final class MoshEngine {
         }
         do {
             let muxed = try muxAudio(videoURL: silentURL, assetA: assetA, assetB: assetB,
-                                     aEndTime: aEndTime)
+                                     rangeA: rangeA, rangeB: rangeB, aEndTime: aEndTime)
             try? FileManager.default.removeItem(at: silentURL)
             progress(1.0)
             return muxed
@@ -116,12 +135,14 @@ final class MoshEngine {
     /// 映像だけを書き出し、Aの終了時刻（出力タイムライン上）を返す
     private func renderVideo(assetA: AVURLAsset, trackA: AVAssetTrack,
                              assetB: AVURLAsset, trackB: AVAssetTrack,
+                             rangeA: (start: Double, length: Double),
+                             rangeB: (start: Double, length: Double),
                              canvas: CGSize, canvasRect: CGRect,
                              settings: Settings, totalSeconds: Double,
                              outputURL: URL,
                              progress: @escaping (Double) -> Void) throws -> CMTime {
-        let (readerA, outputA) = try makeReader(asset: assetA, track: trackA, name: "動画A")
-        let (readerB, outputB) = try makeReader(asset: assetB, track: trackB, name: "動画B")
+        let (readerA, outputA) = try makeReader(asset: assetA, track: trackA, name: "動画A", range: rangeA)
+        let (readerB, outputB) = try makeReader(asset: assetB, track: trackB, name: "動画B", range: rangeB)
 
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
         let bitRate = Int(canvas.width * canvas.height * 6)
@@ -303,6 +324,8 @@ final class MoshEngine {
     // MARK: - 音声ミックス（別パス）
 
     private func muxAudio(videoURL: URL, assetA: AVURLAsset, assetB: AVURLAsset,
+                          rangeA: (start: Double, length: Double),
+                          rangeB: (start: Double, length: Double),
                           aEndTime: CMTime) throws -> URL {
         let composition = AVMutableComposition()
         let rendered = AVURLAsset(url: videoURL)
@@ -317,11 +340,15 @@ final class MoshEngine {
         if let audioA = assetA.tracks(withMediaType: .audio).first,
            let compAudio = composition.addMutableTrack(withMediaType: .audio,
                                                          preferredTrackID: kCMPersistentTrackID_Invalid) {
-            try? compAudio.insertTimeRange(CMTimeRange(start: .zero, duration: assetA.duration),
-                                           of: audioA, at: .zero)
+            try? compAudio.insertTimeRange(
+                CMTimeRange(start: CMTime(seconds: rangeA.start, preferredTimescale: 600),
+                            duration: CMTime(seconds: rangeA.length, preferredTimescale: 600)),
+                of: audioA, at: .zero)
             if let audioB = assetB.tracks(withMediaType: .audio).first {
-                try? compAudio.insertTimeRange(CMTimeRange(start: .zero, duration: assetB.duration),
-                                               of: audioB, at: aEndTime)
+                try? compAudio.insertTimeRange(
+                    CMTimeRange(start: CMTime(seconds: rangeB.start, preferredTimescale: 600),
+                                duration: CMTime(seconds: rangeB.length, preferredTimescale: 600)),
+                    of: audioB, at: aEndTime)
             }
         }
 
@@ -343,9 +370,13 @@ final class MoshEngine {
 
     // MARK: - ヘルパー
 
-    private func makeReader(asset: AVURLAsset, track: AVAssetTrack, name: String) throws -> (reader: AVAssetReader, output: AVAssetReaderTrackOutput) {
+    private func makeReader(asset: AVURLAsset, track: AVAssetTrack, name: String,
+                            range: (start: Double, length: Double)) throws -> (reader: AVAssetReader, output: AVAssetReaderTrackOutput) {
         do {
             let reader = try AVAssetReader(asset: asset)
+            reader.timeRange = CMTimeRange(
+                start: CMTime(seconds: range.start, preferredTimescale: 600),
+                duration: CMTime(seconds: range.length, preferredTimescale: 600))
             let output = AVAssetReaderTrackOutput(
                 track: track,
                 outputSettings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA])

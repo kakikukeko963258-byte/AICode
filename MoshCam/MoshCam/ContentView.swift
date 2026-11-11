@@ -19,6 +19,11 @@ struct VideoInfo {
 final class MoshViewModel: ObservableObject {
     @Published var videoA: VideoInfo?
     @Published var videoB: VideoInfo?
+    // トリミング（開始位置と使う長さ、秒）
+    @Published var aStart: Double = 0
+    @Published var aLength: Double = 0
+    @Published var bStart: Double = 0
+    @Published var bLength: Double = 0
     @Published var moshSeconds: Double = 1.5
     @Published var intensity: Double = 0.7
     @Published var blockSize: Double = 16
@@ -44,7 +49,15 @@ final class MoshViewModel: ObservableObject {
             if let cg = await Self.thumbnail(of: asset) {
                 info.thumbnail = UIImage(cgImage: cg)
             }
-            if slotA { videoA = info } else { videoB = info }
+            if slotA {
+                videoA = info
+                aStart = 0
+                aLength = info.duration
+            } else {
+                videoB = info
+                bStart = 0
+                bLength = info.duration
+            }
             updateIdleStatus()
         }
     }
@@ -60,6 +73,8 @@ final class MoshViewModel: ObservableObject {
 
     func swap() {
         (videoA, videoB) = (videoB, videoA)
+        (aStart, bStart) = (bStart, aStart)
+        (aLength, bLength) = (bLength, aLength)
         resultURL = nil
         player = nil
         updateIdleStatus()
@@ -86,7 +101,9 @@ final class MoshViewModel: ObservableObject {
         statusText = "モッシュ中…"
         let settings = MoshEngine.Settings(moshSeconds: moshSeconds,
                                            intensity: intensity,
-                                           blockSize: blockSize)
+                                           blockSize: blockSize,
+                                           aStart: aStart, aLength: aLength,
+                                           bStart: bStart, bLength: bLength)
         let engine = self.engine
         renderTask = Task {
             do {
@@ -167,12 +184,12 @@ struct ContentView: View {
         ScrollView {
             VStack(spacing: 16) {
                 header
-                videoCard(title: "動画A（崩れる側）", info: vm.videoA, accent: cyan) {
+                videoCard(title: "動画A（崩れる側）", info: vm.videoA, accent: cyan, start: $vm.aStart, length: $vm.aLength) {
                     pickerForA = true
                     showPicker = true
                 }
                 swapButton
-                videoCard(title: "動画B（滲み出る側）", info: vm.videoB, accent: magenta) {
+                videoCard(title: "動画B（滲み出る側）", info: vm.videoB, accent: magenta, start: $vm.bStart, length: $vm.bLength) {
                     pickerForA = false
                     showPicker = true
                 }
@@ -207,31 +224,72 @@ struct ContentView: View {
     }
 
     private func load(provider: NSItemProvider, slotA: Bool) {
-        let typeId = UTType.movie.identifier
-        guard provider.hasItemConformingToTypeIdentifier(typeId) else {
-            vm.errorMessage = "動画を読み込めませんでした。別の動画で試してください。"
+        // 動画の型IDは素材ごとに違う（com.apple.quicktime-movie、public.mpeg-4 等）。
+        // 汎用の "public.movie" で頼むと失敗する素材が多いので、
+        // プロバイダが実際に登録している型IDを具体的なものから順に試す。
+        var candidates = provider.registeredTypeIdentifiers.filter { id in
+            id != UTType.movie.identifier
+                && (id.contains("movie") || id.contains("video") || id.contains("mpeg")
+                    || id.contains("quicktime") || id.contains("3gpp") || id.contains("mp4"))
+        }
+        candidates.append(UTType.movie.identifier)
+        tryLoadFile(provider: provider, ids: candidates[...], slotA: slotA)
+    }
+
+    private func tryLoadFile(provider: NSItemProvider, ids: ArraySlice<String>, slotA: Bool) {
+        guard let typeId = ids.first else {
+            // 最後の手段: データとして読み込んで書き出す
+            tryLoadData(provider: provider, slotA: slotA)
             return
         }
         provider.loadFileRepresentation(forTypeIdentifier: typeId) { url, _ in
-            // urlはこのクロージャを抜けると消えるので、その場でコピーする
             var copied: URL?
             if let url {
+                copied = Self.copyToTemp(url: url)
+            }
+            if let copied {
+                Task { @MainActor in
+                    vm.loadPicked(url: copied, into: slotA)
+                }
+            } else {
+                tryLoadFile(provider: provider, ids: ids.dropFirst(), slotA: slotA)
+            }
+        }
+    }
+
+    private func tryLoadData(provider: NSItemProvider, slotA: Bool) {
+        let typeId = provider.registeredTypeIdentifiers.first ?? UTType.movie.identifier
+        provider.loadDataRepresentation(forTypeIdentifier: typeId) { data, _ in
+            var saved: URL?
+            if let data {
+                let name = provider.suggestedName ?? "video"
+                let ext = (name as NSString).pathExtension.isEmpty
+                    ? "mov" : (name as NSString).pathExtension
                 let dir = FileManager.default.temporaryDirectory
                     .appendingPathComponent("picked-\(UUID().uuidString)", isDirectory: true)
                 try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-                let dest = dir.appendingPathComponent(url.lastPathComponent)
-                if (try? FileManager.default.copyItem(at: url, to: dest)) != nil {
-                    copied = dest
+                let dest = dir.appendingPathComponent("video.\(ext)")
+                if (try? data.write(to: dest, options: .atomic)) != nil {
+                    saved = dest
                 }
             }
             Task { @MainActor in
-                if let copied {
-                    vm.loadPicked(url: copied, into: slotA)
+                if let saved {
+                    vm.loadPicked(url: saved, into: slotA)
                 } else {
-                    vm.errorMessage = "動画を読み込めませんでした。別の動画で試してください。"
+                    vm.errorMessage = "動画を読み込めませんでした。iCloud上の動画は本体にダウンロードしてから選んでください。"
                 }
             }
         }
+    }
+
+    /// loadFileRepresentationのURLはクロージャを抜けると消えるので、その場でコピーする
+    private static func copyToTemp(url: URL) -> URL? {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("picked-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let dest = dir.appendingPathComponent(url.lastPathComponent)
+        return (try? FileManager.default.copyItem(at: url, to: dest)) != nil ? dest : nil
     }
 
     // MARK: ヘッダー
@@ -270,8 +328,10 @@ struct ContentView: View {
     // MARK: 動画カード
 
     private func videoCard(title: String, info: VideoInfo?, accent: Color,
+                           start: Binding<Double>, length: Binding<Double>,
                            onTap: @escaping () -> Void) -> some View {
-        Button(action: onTap) {
+        VStack(spacing: 10) {
+            Button(action: onTap) {
             HStack(spacing: 12) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 10)
@@ -309,10 +369,52 @@ struct ContentView: View {
                     .foregroundStyle(.white.opacity(0.4))
             }
             .padding(12)
-            .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 16))
-            .overlay(RoundedRectangle(cornerRadius: 16).stroke(accent.opacity(0.5), lineWidth: 1))
+            }
+            if let info, info.duration > 1.2 {
+                trimControls(duration: info.duration, accent: accent, start: start, length: length)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 12)
+            }
         }
+        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(accent.opacity(0.5), lineWidth: 1))
         .disabled(vm.isProcessing)
+    }
+
+    /// 開始位置と使う長さのスライダー
+    private func trimControls(duration: Double, accent: Color,
+                              start: Binding<Double>, length: Binding<Double>) -> some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 10) {
+                Text("開始")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .frame(width: 32, alignment: .leading)
+                Slider(value: start, in: 0...max(0.1, duration - 0.5), step: 0.1)
+                    .tint(accent)
+                    .onChange(of: start.wrappedValue) { _, newStart in
+                        if newStart + length.wrappedValue > duration {
+                            length.wrappedValue = max(0.5, duration - newStart)
+                        }
+                    }
+                Text(MoshViewModel.timeLabel(start.wrappedValue))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.white)
+                    .frame(width: 36)
+            }
+            HStack(spacing: 10) {
+                Text("長さ")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .frame(width: 32, alignment: .leading)
+                Slider(value: length, in: 0.5...max(0.6, duration - start.wrappedValue), step: 0.1)
+                    .tint(accent)
+                Text(MoshViewModel.timeLabel(length.wrappedValue))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.white)
+                    .frame(width: 36)
+            }
+        }
     }
 
     private var swapButton: some View {
@@ -469,6 +571,8 @@ struct ContentView: View {
                         .font(.footnote)
                 }
                 Section("仕様と制限") {
+                    Text("各動画の「開始」と「長さ」で、使う区間を切り取れます。Aは切り取った区間の終わりでモッシュし、Bは切り取った区間の始まりから滲み出ます。")
+                        .font(.footnote)
                     Text("出力は動画Aのサイズ・向きに合わせ、長辺は最大1280pxです。Bの比率が違う場合は中央で切り抜きます。")
                         .font(.footnote)
                     Text("音声はAの音声の後ろにBの音声をそのまま繋ぎます（つなぎ目でパッと切り替わります）。")
