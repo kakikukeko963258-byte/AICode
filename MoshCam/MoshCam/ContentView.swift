@@ -156,8 +156,8 @@ final class MoshViewModel: ObservableObject {
 
 struct ContentView: View {
     @StateObject private var vm = MoshViewModel()
-    @State private var itemA: PhotosPickerItem?
-    @State private var itemB: PhotosPickerItem?
+    @State private var showPicker = false
+    @State private var pickerForA = true
     @State private var showHelp = false
 
     private let cyan = Color(red: 0.2, green: 0.9, blue: 1.0)
@@ -167,9 +167,15 @@ struct ContentView: View {
         ScrollView {
             VStack(spacing: 16) {
                 header
-                videoCard(title: "動画A（崩れる側）", info: vm.videoA, accent: cyan, item: $itemA)
+                videoCard(title: "動画A（崩れる側）", info: vm.videoA, accent: cyan) {
+                    pickerForA = true
+                    showPicker = true
+                }
                 swapButton
-                videoCard(title: "動画B（滲み出る側）", info: vm.videoB, accent: magenta, item: $itemB)
+                videoCard(title: "動画B（滲み出る側）", info: vm.videoB, accent: magenta) {
+                    pickerForA = false
+                    showPicker = true
+                }
                 settingsCard
                 moshButton
                 if let url = vm.resultURL {
@@ -184,8 +190,11 @@ struct ContentView: View {
             .padding(16)
         }
         .background(Color(red: 0.05, green: 0.05, blue: 0.08).ignoresSafeArea())
-        .onChange(of: itemA) { _, newItem in load(newItem, slotA: true) }
-        .onChange(of: itemB) { _, newItem in load(newItem, slotA: false) }
+        .sheet(isPresented: $showPicker) {
+            VideoPicker { provider in
+                load(provider: provider, slotA: pickerForA)
+            }
+        }
         .alert("エラー", isPresented: Binding(
             get: { vm.errorMessage != nil },
             set: { if !$0 { vm.errorMessage = nil } }
@@ -197,9 +206,7 @@ struct ContentView: View {
         .sheet(isPresented: $showHelp) { helpSheet }
     }
 
-    private func load(_ item: PhotosPickerItem?, slotA: Bool) {
-        guard let item else { return }
-        let provider = item.itemProvider
+    private func load(provider: NSItemProvider, slotA: Bool) {
         let typeId = UTType.movie.identifier
         guard provider.hasItemConformingToTypeIdentifier(typeId) else {
             vm.errorMessage = "動画を読み込めませんでした。別の動画で試してください。"
@@ -263,8 +270,8 @@ struct ContentView: View {
     // MARK: 動画カード
 
     private func videoCard(title: String, info: VideoInfo?, accent: Color,
-                           item: Binding<PhotosPickerItem?>) -> some View {
-        PhotosPicker(selection: item, matching: .videos) {
+                           onTap: @escaping () -> Void) -> some View {
+        Button(action: onTap) {
             HStack(spacing: 12) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 10)
@@ -476,6 +483,42 @@ struct ContentView: View {
                     Button("閉じる") { showHelp = false }
                 }
             }
+        }
+    }
+}
+
+// MARK: - 動画ピッカー（PHPicker）
+
+struct VideoPicker: UIViewControllerRepresentable {
+    var onPick: (NSItemProvider) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    func makeUIViewController(context: Context) -> PHPickerViewController {
+        var config = PHPickerConfiguration()
+        config.filter = .videos
+        config.selectionLimit = 1
+        let controller = PHPickerViewController(configuration: config)
+        controller.delegate = context.coordinator
+        return controller
+    }
+
+    func updateUIViewController(_ uiViewController: PHPickerViewController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    final class Coordinator: NSObject, PHPickerViewControllerDelegate {
+        let parent: VideoPicker
+
+        init(parent: VideoPicker) {
+            self.parent = parent
+        }
+
+        func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+            parent.dismiss()
+            guard let provider = results.first?.itemProvider else { return }
+            parent.onPick(provider)
         }
     }
 }
