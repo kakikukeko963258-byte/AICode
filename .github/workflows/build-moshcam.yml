@@ -1,0 +1,79 @@
+# Build MoshCam to an unsigned .ipa on a GitHub-hosted macOS runner.
+# No signing certificates or secrets are used. The resulting .ipa must be
+# re-signed afterwards (SideStore / AltStore with a free Apple ID, or a paid
+# Apple Developer account) before it can be installed on an iPhone.
+name: Build MoshCam unsigned IPA
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'MoshCam/**'
+      - 'tools/generate_moshcam_icon.py'
+      - '.github/workflows/build-moshcam.yml'
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-unsigned-ipa:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Generate AppIcon (not stored in git)
+        run: python3 tools/generate_moshcam_icon.py
+
+      - name: Select Xcode 26
+        run: |
+          ls /Applications | grep -i xcode || true
+          if [ -d /Applications/Xcode_26.5.app ]; then
+            sudo xcode-select -s /Applications/Xcode_26.5.app/Contents/Developer
+          elif [ -d /Applications/Xcode_26.app ]; then
+            sudo xcode-select -s /Applications/Xcode_26.app/Contents/Developer
+          else
+            echo "No Xcode_26 app found; using default Xcode."
+          fi
+          xcodebuild -version
+
+      - name: Archive (Release, no code signing)
+        run: |
+          xcodebuild archive \
+            -project MoshCam/MoshCam.xcodeproj \
+            -scheme MoshCam \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/MoshCam.xcarchive \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      - name: Package unsigned .ipa from the archive
+        run: |
+          APP_PATH="build/MoshCam.xcarchive/Products/Applications/MoshCam.app"
+          test -d "$APP_PATH" || { echo "ERROR: $APP_PATH not found"; ls -R build/MoshCam.xcarchive; exit 1; }
+          rm -rf build/Payload build/MoshCam-unsigned.ipa
+          mkdir -p build/Payload
+          cp -R "$APP_PATH" build/Payload/
+          (cd build && zip -r -y MoshCam-unsigned.ipa Payload)
+          ls -lh build/MoshCam-unsigned.ipa
+          unzip -l build/MoshCam-unsigned.ipa | head -20
+
+      - name: Upload unsigned .ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: MoshCam-unsigned
+          path: build/MoshCam-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: MoshCam-build-log
+          path: build/
+          if-no-files-found: ignore
+          retention-days: 7
