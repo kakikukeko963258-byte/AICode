@@ -7,21 +7,6 @@ import UniformTypeIdentifiers
 
 // MARK: - 選択した動画ファイル
 
-struct PickedVideo: Transferable {
-    let url: URL
-
-    static var transferRepresentation: some TransferRepresentation {
-        FileRepresentation(contentType: .movie, importing: { received in
-            let dir = FileManager.default.temporaryDirectory
-                .appendingPathComponent("picked-\(UUID().uuidString)", isDirectory: true)
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            let dest = dir.appendingPathComponent(received.file.lastPathComponent)
-            try FileManager.default.copyItem(at: received.file, to: dest)
-            return PickedVideo(url: dest)
-        })
-    }
-}
-
 struct VideoInfo {
     var url: URL
     var duration: Double = 0
@@ -51,8 +36,7 @@ final class MoshViewModel: ObservableObject {
 
     var canMosh: Bool { videoA != nil && videoB != nil && !isProcessing }
 
-    func loadPicked(_ picked: PickedVideo, into slotA: Bool) {
-        let url = picked.url
+    func loadPicked(url: URL, into slotA: Bool) {
         Task {
             let asset = AVURLAsset(url: url)
             var info = VideoInfo(url: url)
@@ -215,11 +199,30 @@ struct ContentView: View {
 
     private func load(_ item: PhotosPickerItem?, slotA: Bool) {
         guard let item else { return }
-        Task {
-            if let picked = try? await item.loadTransferable(type: PickedVideo.self) {
-                vm.loadPicked(picked, into: slotA)
-            } else {
-                vm.errorMessage = "動画を読み込めませんでした。別の動画で試してください。"
+        let provider = item.itemProvider
+        let typeId = UTType.movie.identifier
+        guard provider.hasItemConformingToTypeIdentifier(typeId) else {
+            vm.errorMessage = "動画を読み込めませんでした。別の動画で試してください。"
+            return
+        }
+        provider.loadFileRepresentation(forTypeIdentifier: typeId) { url, _ in
+            // urlはこのクロージャを抜けると消えるので、その場でコピーする
+            var copied: URL?
+            if let url {
+                let dir = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("picked-\(UUID().uuidString)", isDirectory: true)
+                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                let dest = dir.appendingPathComponent(url.lastPathComponent)
+                if (try? FileManager.default.copyItem(at: url, to: dest)) != nil {
+                    copied = dest
+                }
+            }
+            Task { @MainActor in
+                if let copied {
+                    vm.loadPicked(url: copied, into: slotA)
+                } else {
+                    vm.errorMessage = "動画を読み込めませんでした。別の動画で試してください。"
+                }
             }
         }
     }
