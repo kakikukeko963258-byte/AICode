@@ -372,15 +372,19 @@ struct MarkView: View {
                 }
                 .stroke(mark.color, style: StrokeStyle(lineWidth: lw, lineCap: .round))
             case .sankaku:
+                // 正三角形: 高さ = 底辺 × √3/2、上下中央に配置
                 Path { path in
-                    path.move(to: CGPoint(x: size / 2, y: m))
-                    path.addLine(to: CGPoint(x: size - m, y: size - m))
-                    path.addLine(to: CGPoint(x: m, y: size - m))
+                    let w = size - m * 2
+                    let h = w * 0.8660254
+                    let top = (size - h) / 2
+                    path.move(to: CGPoint(x: size / 2, y: top))
+                    path.addLine(to: CGPoint(x: size - m, y: top + h))
+                    path.addLine(to: CGPoint(x: m, y: top + h))
                     path.closeSubpath()
                 }
                 .stroke(mark.color, style: StrokeStyle(lineWidth: lw, lineJoin: .round))
             case .shikaku:
-                Rectangle()
+                RoundedRectangle(cornerRadius: size * 0.18)
                     .strokeBorder(mark.color, lineWidth: lw)
                     .padding(m)
             }

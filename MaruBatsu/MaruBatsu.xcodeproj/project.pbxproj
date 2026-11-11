@@ -285,7 +285,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.3;
+				MARKETING_VERSION = 1.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.kakuei.marubatsu;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMBED_LIBRARIES_WITH_INSTALL = YES;
@@ -312,7 +312,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.3;
+				MARKETING_VERSION = 1.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.kakuei.marubatsu;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMBED_LIBRARIES_WITH_INSTALL = YES;
