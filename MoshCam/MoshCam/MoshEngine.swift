@@ -120,8 +120,8 @@ final class MoshEngine {
                              settings: Settings, totalSeconds: Double,
                              outputURL: URL,
                              progress: @escaping (Double) -> Void) throws -> CMTime {
-        let readerA = try makeReader(asset: assetA, track: trackA, name: "動画A")
-        let readerB = try makeReader(asset: assetB, track: trackB, name: "動画B")
+        let (readerA, outputA) = try makeReader(asset: assetA, track: trackA, name: "動画A")
+        let (readerB, outputB) = try makeReader(asset: assetB, track: trackB, name: "動画B")
 
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
         let bitRate = Int(canvas.width * canvas.height * 6)
@@ -170,7 +170,7 @@ final class MoshEngine {
         var lastAOutPts = CMTime.zero
         var lastADuration = CMTime(value: 1, timescale: 30)
         readerA.startReading()
-        while let sample = readerA.copyNextSampleBuffer() {
+        while let sample = outputA.copyNextSampleBuffer() {
             if isCancelled { break }
             guard let pixelBuffer = CMSampleBufferGetImageBuffer(sample) else { continue }
             let pts = CMSampleBufferGetPresentationTimeStamp(sample)
@@ -199,7 +199,7 @@ final class MoshEngine {
         var prevBRaw: CVPixelBuffer?
         var firstBPts: CMTime?
         readerB.startReading()
-        while let sample = readerB.copyNextSampleBuffer() {
+        while let sample = outputB.copyNextSampleBuffer() {
             if isCancelled { break }
             guard let pixelBuffer = CMSampleBufferGetImageBuffer(sample) else { continue }
             let pts = CMSampleBufferGetPresentationTimeStamp(sample)
@@ -343,7 +343,7 @@ final class MoshEngine {
 
     // MARK: - ヘルパー
 
-    private func makeReader(asset: AVURLAsset, track: AVAssetTrack, name: String) throws -> AVAssetReader {
+    private func makeReader(asset: AVURLAsset, track: AVAssetTrack, name: String) throws -> (reader: AVAssetReader, output: AVAssetReaderTrackOutput) {
         do {
             let reader = try AVAssetReader(asset: asset)
             let output = AVAssetReaderTrackOutput(
@@ -352,7 +352,7 @@ final class MoshEngine {
             output.alwaysCopiesSampleData = false
             guard reader.canAdd(output) else { throw MoshError.readerFailed(name) }
             reader.add(output)
-            return reader
+            return (reader, output)
         } catch let error as MoshError {
             throw error
         } catch {

@@ -11,14 +11,14 @@ struct PickedVideo: Transferable {
     let url: URL
 
     static var transferRepresentation: some TransferRepresentation {
-        FileRepresentation(contentType: .movie) { received in
+        FileRepresentation(contentType: .movie, importing: { received in
             let dir = FileManager.default.temporaryDirectory
                 .appendingPathComponent("picked-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             let dest = dir.appendingPathComponent(received.file.lastPathComponent)
             try FileManager.default.copyItem(at: received.file, to: dest)
             return PickedVideo(url: dest)
-        }
+        })
     }
 }
 
