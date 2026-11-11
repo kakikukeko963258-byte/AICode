@@ -318,11 +318,13 @@ struct Mode2View: View {
         Button {
             place(id)
         } label: {
-            Text(cells[id]?.symbol ?? "")
-                .font(.system(size: cellSize * 0.58, weight: .bold))
-                .foregroundStyle(cells[id]?.color ?? .primary)
-                .frame(width: cellSize, height: cellSize)
-                .contentShape(Rectangle())
+            ZStack {
+                if let mark = cells[id] {
+                    MarkView(mark: mark, size: cellSize * 0.62)
+                }
+            }
+            .frame(width: cellSize, height: cellSize)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
@@ -345,6 +347,45 @@ struct Mode2View: View {
         cells = [:]
         turnIndex = 0
         gameOver = false
+    }
+}
+
+/// モード2の記号描画。4記号とも同じ線幅のアウトライン（中空）で描く。
+struct MarkView: View {
+    let mark: Mark
+    let size: CGFloat
+
+    var body: some View {
+        let lw = size * 0.13
+        let m = size * 0.07 // 線の端がはみ出さない余白
+        ZStack {
+            switch mark {
+            case .maru:
+                Circle()
+                    .strokeBorder(mark.color, lineWidth: lw)
+            case .batsu:
+                Path { path in
+                    path.move(to: CGPoint(x: m, y: m))
+                    path.addLine(to: CGPoint(x: size - m, y: size - m))
+                    path.move(to: CGPoint(x: size - m, y: m))
+                    path.addLine(to: CGPoint(x: m, y: size - m))
+                }
+                .stroke(mark.color, style: StrokeStyle(lineWidth: lw, lineCap: .round))
+            case .sankaku:
+                Path { path in
+                    path.move(to: CGPoint(x: size / 2, y: m))
+                    path.addLine(to: CGPoint(x: size - m, y: size - m))
+                    path.addLine(to: CGPoint(x: m, y: size - m))
+                    path.closeSubpath()
+                }
+                .stroke(mark.color, style: StrokeStyle(lineWidth: lw, lineJoin: .round))
+            case .shikaku:
+                Rectangle()
+                    .strokeBorder(mark.color, lineWidth: lw)
+                    .padding(m)
+            }
+        }
+        .frame(width: size, height: size)
     }
 }
 
